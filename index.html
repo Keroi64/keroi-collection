@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Keroi's Collection - Diecast Araba Koleksiyonları</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Firebase SDK -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
+  
+  <style>
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .animate-spin {
+      animation: spin 1s linear infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+
+  <script>
+    // ⚠️ NOT: Bu API Key herkese açık ama Firebase Security Rules sayesinde
+    // sadece giriş yapan kullanıcılar verilere erişebilir!
+    const firebaseConfig = {
+      apiKey: "AIzaSyCHP6GWHnWJO9WERhRAik2WmrQ5G1WgU_c",
+      authDomain: "keroi-collection.firebaseapp.com",
+      projectId: "keroi-collection",
+      storageBucket: "keroi-collection.firebasestorage.app",
+      messagingSenderId: "480819882731",
+      appId: "1:480819882731:web:9bb8f86521e5d6bcbe2cae"
+    };
+
+    // Firebase'i başlat
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+    const storage = firebase.storage();
+
+    // App State
+    let state = {
+      isLoggedIn: false,
+      currentUser: null,
+      showLoginModal: true,
+      isRegistering: false,
+      loginForm: { email: '', password: '', username: '' },
+      currentPage: 'home',
+      selectedBrand: null,
+      selectedCategory: null,
+      showAddModal: false,
+      viewingUser: null,
+      collections: {},
+      formData: { name: '', year: '', series: '', image: '', price: '', purchaseDate: '', tags: [] },
+      newTag: '',
+      uploadingImage: false,
+      loading: false,
+      allUsers: []
+    };
+
+    const brandCategories = {
+      hotwheels: ['Premiums', 'Tekli Hot Wheels', 'Silver Series', '2-Packs', '5-Packs', 'Car Culture', 'Red Line Club', 'Treasure Hunts'],
+      miniGt: ['Mini GT 1:64', 'Mini GT Raw', 'Tarmac Works', 'Limited Edition'],
+      matchbox: ['Matchbox Mainline', 'Power Grabs', 'Collectors Series', 'Convoys'],
+      majorette: ['Premium Cars', 'Street Cars', 'Racing Cars', 'Deluxe Series'],
+      lego: ['Speed Champions', 'Technic', 'City', 'Creator']
+    };
+
+    const brandInfo = {
+      hotwheels: { name: 'Hot Wheels', color: 'from-orange-500 to-red-600' },
+      miniGt: { name: 'Mini GT', color: 'from-blue-500 to-cyan-600' },
+      matchbox: { name: 'Matchbox', color: 'from-yellow-500 to-orange-500' },
+      majorette: { name: 'Majorette', color: 'from-red-500 to-pink-600' },
+      lego: { name: 'Lego', color: 'from-yellow-400 to-red-500' }
+    };
+
+    // Firebase Auth listener
+    auth.onAuthStateChanged(async (user) => {
+      if (user) {
+        state.isLoggedIn = true;
+        const userData = await loadUserData(user.uid);
+        state.currentUser = {
+          uid: user.uid,
+          email: user.email,
+          username: userData?.username || user.email.split('@')[0]
+        };
+        state.showLoginModal = false;
+        await loadUserCollection(user.uid);
+        await loadAllUsers();
+        render();
+      } else {
+        state.isLoggedIn = false;
+        state.currentUser = null;
+        state.showLoginModal = true;
+        render();
+      }
+    });
+
+    async function loadUserData(uid) {
+      try {
+        const doc = await db.collection('users').doc(uid).get();
+        return doc.data();
+      } catch (error) {
+        console.error('Kullanıcı verisi yüklenemedi:', error);
+        return null;
+      }
+    }
+
+    async function loadAllUsers() {
+      try {
+        const snapshot = await db.collection('users').get();
+        state.allUsers = [];
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          state.allUsers.push({
+            uid: doc.id,
+            username: data.username,
+            email: data.email,
+            carCount: data.carCount || 0
+          });
+        });
+      } catch (error) {
+        console.error('Kullanıcılar yüklenemedi:', error);
+      }
+    }
+
+    async function loadUserCollection(uid) {
+      try {
+        const snapshot = await db.collection('cars')
+          .where('userId', '==', uid)
+          .get();
+        
+        const newCollections = {};
+        Object.keys(brandCategories).forEach(brand => {
+          newCollections[brand] = {};
+          brandCategories[brand].forEach(category => {
+            newCollections[brand][category] = [];
+          });
+        });
+
+        snapshot.forEach(doc => {
+          const car = { id: doc.id, ...doc.data() };
+          if (newCollections[car.brand] && newCollections[car.brand][car.category]) {
+            newCollections[car.brand][car.category].push(car);
+          }
+        });
+
+        state.collections = newCollections;
+      } catch (error) {
+        console.error('Koleksiyon yüklenemedi:', error);
+        alert('Veriler yüklenirken hata oluştu!');
+      }
+    }
+
+    async function handleLogin() {
+      if (!state.loginForm.email || !state.loginForm.password) {
+        alert('Lütfen email ve şifre girin!');
+        return;
+      }
+
+      state.loading = true;
+      render();
+
+      try {
+        if (state.isRegistering) {
+          if (!state.loginForm.username) {
+            alert('Lütfen kullanıcı adı girin!');
+            state.loading = false;
+            render();
+            return;
+          }
+
+          // Yeni kullanıcı oluştur
+          const userCredential = await auth.createUserWithEmailAndPassword(
+            state.loginForm.email,
+            state.loginForm.password
+          );
+
+          // Firestore'da kullanıcı bilgilerini kaydet
+          await db.collection('users').doc(userCredential.user.uid).set({
+            username: state.loginForm.username,
+            email: state.loginForm.email,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            carCount: 0
+          });
+
+          alert('Kayıt başarılı! Hoş geldiniz!');
+        } else {
+          // Giriş yap
+          await auth.signInWithEmailAndPassword(
+            state.loginForm.email,
+            state.loginForm.password
+          );
+        }
+
+        state.loginForm = { email: '', password: '', username: '' };
+      } catch (error) {
+        console.error('Hata:', error);
+        if (error.code === 'auth/email-already-in-use') {
+          alert('Bu email zaten kayıtlı!');
+        } else if (error.code === 'auth/weak-password') {
+          alert('Şifre en az 6 karakter olmalı!');
+        } else if (error.code === 'auth/user-not-found') {
+          alert('Kullanıcı bulunamadı!');
+        } else if (error.code === 'auth/wrong-password') {
+          alert('Şifre hatalı!');
+        } else {
+          alert('Bir hata oluştu: ' + error.message);
+        }
+        state.loading = false;
+        render();
+      }
+    }
+
+    async function handleLogout() {
+      try {
+        await auth.signOut();
+        state.collections = {};
+        state.currentPage = 'home';
+        state.viewingUser = null;
+      } catch (error) {
+        console.error('Çıkış hatası:', error);
+        alert('Çıkış yapılırken hata oluştu!');
+      }
+    }
+
+    async function viewUserCollection(uid) {
+      try {
+        const userDoc = await db.collection('users').doc(uid).get();
+        const userData = userDoc.data();
+        
+        state.viewingUser = {
+          uid: uid,
+          username: userData.username,
+          email: userData.email
+        };
+
+        await loadUserCollection(uid);
+        state.currentPage = 'home';
+        render();
+      } catch (error) {
+        console.error('Koleksiyon yüklenemedi:', error);
+        alert('Koleksiyon görüntülenirken hata oluştu!');
+      }
+    }
+
+    async function returnToMyCollection() {
+      state.viewingUser = null;
+      await loadUserCollection(state.currentUser.uid);
+      state.currentPage = 'home';
+      render();
+    }
+
+    function processImageFile(file) {
+      return new Promise((resolve, reject) => {
+        if (!file.type.startsWith('image/')) {
+          reject('Lütfen bir resim dosyası seçin!');
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = () => reject('Dosya yüklenirken hata oluştu!');
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function handleAddCar() {
+      if (state.viewingUser) {
+        alert('Başkasının koleksiyonuna araç ekleyemezsiniz!');
+        return;
+      }
+      if (!state.formData.name || !state.formData.image) {
+        alert('Lütfen araç adı ve fotoğraf girin!');
+        return;
+      }
+
+      state.loading = true;
+      render();
+
+      try {
+        const carData = {
+          ...state.formData,
+          userId: state.currentUser.uid,
+          brand: state.selectedBrand,
+          category: state.selectedCategory,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        };
+
+        await db.collection('cars').add(carData);
+
+        // Kullanıcının araç sayısını güncelle
+        await db.collection('users').doc(state.currentUser.uid).update({
+          carCount: firebase.firestore.FieldValue.increment(1)
+        });
+
+        await loadUserCollection(state.currentUser.uid);
+        await loadAllUsers();
+        
+        state.formData = { name: '', year: '', series: '', image: '', price: '', purchaseDate: '', tags: [] };
+        state.showAddModal = false;
+        state.loading = false;
+        render();
+        
+        alert('Araç başarıyla eklendi!');
+      } catch (error) {
+        console.error('Araç eklenemedi:', error);
+        alert('Araç eklenirken hata oluştu!');
+        state.loading = false;
+        render();
+      }
+    }
+
+    async function handleDeleteCar(carId) {
+      if (state.viewingUser) {
+        alert('Başkasının koleksiyonundan araç silemezsiniz!');
+        return;
+      }
+      if (!confirm('Bu aracı silmek istediğinizden emin misiniz?')) return;
+
+      state.loading = true;
+      render();
+
+      try {
+        await db.collection('cars').doc(carId).delete();
+
+        // Kullanıcının araç sayısını güncelle
+        await db.collection('users').doc(state.currentUser.uid).update({
+          carCount: firebase.firestore.FieldValue.increment(-1)
+        });
+
+        await loadUserCollection(state.currentUser.uid);
+        await loadAllUsers();
+        state.loading = false;
+        render();
+        
+        alert('Araç silindi!');
+      } catch (error) {
+        console.error('Araç silinemedi:', error);
+        alert('Araç silinirken hata oluştu!');
+        state.loading = false;
+        render();
+      }
+    }
+
+    function getStats() {
+      let totalCars = 0;
+      let totalValue = 0;
+      const brandStats = {};
+
+      Object.entries(state.collections).forEach(([brand, categories]) => {
+        brandStats[brand] = 0;
+        Object.values(categories).forEach(cars => {
+          totalCars += cars.length;
+          brandStats[brand] += cars.length;
+          cars.forEach(car => {
+            if (car.price) totalValue += parseFloat(car.price);
+          });
+        });
+      });
+
+      return { totalCars, totalValue, brandStats };
+    }
+
+    function render() {
+      const root = document.getElementById('root');
+      const stats = getStats();
+
+      if (state.loading) {
+        root.innerHTML = `
+          <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-white rounded-lg p-8 text-center">
+              <div class="animate-spin rounded-full h-16 w-16 border-b-4 border-blue-600 mx-auto mb-4"></div>
+              <p class="text-xl font-bold text-gray-800">Yükleniyor...</p>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      if (state.showLoginModal) {
+        root.innerHTML = `
+          <div class="min-h-screen bg-gradient-to-br from-red-600 to-orange-600 flex items-center justify-center p-4">
+            <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8">
+              <div class="text-center mb-8">
+                <i data-lucide="car" class="w-16 h-16 mx-auto mb-4 text-red-600"></i>
+                <h1 class="text-3xl font-bold text-gray-800">Keroi's Collection</h1>
+                <p class="text-gray-600 mt-2">Diecast Araba Koleksiyonları</p>
+              </div>
+
+              <div class="space-y-4">
+                ${state.isRegistering ? `
+                  <input type="text" id="username" placeholder="Kullanıcı Adı" 
+                    class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500">
+                ` : ''}
+                <input type="email" id="email" placeholder="Email" 
+                  class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500">
+                <input type="password" id="password" placeholder="Şifre (min 6 karakter)" 
+                  class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500">
+                
+                <button onclick="handleLogin()" 
+                  class="w-full bg-gradient-to-r from-red-600 to-orange-600 text-white py-3 rounded-lg font-bold hover:from-red-700 hover:to-orange-700">
+                  ${state.isRegistering ? 'Kayıt Ol' : 'Giriş Yap'}
+                </button>
+
+                <button onclick="state.isRegistering = !state.isRegistering; render();" 
+                  class="w-full text-gray-600 hover:text-gray-800 text-sm">
+                  ${state.isRegistering ? 'Zaten hesabım var, giriş yap' : 'Hesabın yok mu? Kayıt ol'}
+                </button>
+              </div>
+
+              <div class="mt-6 pt-6 border-t border-gray-200">
+                <p class="text-xs text-gray-500 text-center">
+                  🔒 Güvenli Firebase Authentication ile korunmaktadır
+                </p>
+              </div>
+            </div>
+          </div>
+        `;
+
+        setTimeout(() => {
+          const emailInput = document.getElementById('email');
+          const passwordInput = document.getElementById('password');
+          const usernameInput = document.getElementById('username');
+
+          if (emailInput) emailInput.oninput = (e) => state.loginForm.email = e.target.value;
+          if (passwordInput) {
+            passwordInput.oninput = (e) => state.loginForm.password = e.target.value;
+            passwordInput.onkeypress = (e) => { if (e.key === 'Enter') handleLogin(); };
+          }
+          if (usernameInput) usernameInput.oninput = (e) => state.loginForm.username = e.target.value;
+        }, 0);
+
+        lucide.createIcons();
+        return;
+      }
+
+      // Ana sayfa render
+      root.innerHTML = renderMainPage(stats);
+      lucide.createIcons();
+      setupEventListeners();
+    }
+
+    function renderMainPage(stats) {
+      return `
+        <div class="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+          <header class="bg-gradient-to-r from-red-600 to-orange-600 text-white shadow-lg">
+            <div class="max-w-7xl mx-auto px-4 py-6">
+              <div class="flex items-center justify-between">
+                <h1 class="text-3xl font-bold flex items-center gap-3">
+                  <i data-lucide="car" class="w-8 h-8"></i>
+                  ${state.viewingUser ? state.viewingUser.username + "'in Koleksiyonu" : 'Koleksiyonum'}
+                </h1>
+                <div class="flex items-center gap-4">
+                  ${state.viewingUser ? `
+                    <button onclick="returnToMyCollection()" 
+                      class="bg-white text-red-600 px-4 py-2 rounded-lg hover:bg-gray-100 font-semibold flex items-center gap-2">
+                      <i data-lucide="home" class="w-4 h-4"></i>
+                      Koleksiyonuma Dön
+                    </button>
+                  ` : ''}
+                  <div class="flex items-center gap-3 bg-white bg-opacity-20 px-4 py-2 rounded-lg">
+                    <i data-lucide="users" class="w-5 h-5"></i>
+                    <span class="font-semibold">${state.currentUser.username}</span>
+                  </div>
+                  <button onclick="handleLogout()" class="hover:text-yellow-300 flex items-center gap-2">
+                    <i data-lucide="log-out" class="w-5 h-5"></i>
+                    Çıkış
+                  </button>
+                </div>
+              </div>
+            </div>
+          </header>
+
+          <div class="flex">
+            <main class="flex-1 p-4">
+              ${renderMainContent(stats)}
+            </main>
+
+            <aside class="w-80 bg-white shadow-lg p-6 overflow-y-auto max-h-screen">
+              <h3 class="text-2xl font-bold mb-4 text-gray-800 flex items-center gap-2">
+                <i data-lucide="users" class="w-6 h-6"></i>
+                Tüm Koleksiyonlar
+              </h3>
+              <p class="text-sm text-gray-600 mb-4">${state.allUsers.length} koleksiyoncu</p>
+
+              <div class="space-y-3">
+                ${state.allUsers.map(user => {
+                  const isCurrentUser = state.currentUser.uid === user.uid;
+                  const isViewing = state.viewingUser?.uid === user.uid;
+                  
+                  return `
+                    <button onclick="${isCurrentUser ? 'returnToMyCollection()' : `viewUserCollection('${user.uid}')`}" 
+                      class="w-full p-4 rounded-lg text-left transition-all ${
+                        isViewing ? 'bg-blue-600 text-white shadow-lg' : 
+                        isCurrentUser ? 'bg-gradient-to-r from-red-100 to-orange-100 border-2 border-red-300' : 
+                        'bg-gray-50 hover:bg-gray-100 border border-gray-200'
+                      }">
+                      <div class="flex items-center justify-between mb-2">
+                        <span class="font-bold ${isViewing ? 'text-white' : 'text-gray-800'}">
+                          ${user.username}${isCurrentUser ? ' (Sen)' : ''}
+                        </span>
+                      </div>
+                      <div class="flex items-center gap-4 text-sm">
+                        <span class="flex items-center gap-1 ${isViewing ? 'text-white' : 'text-gray-600'}">
+                          <i data-lucide="car" class="w-4 h-4"></i>
+                          ${user.carCount || 0} araç
+                        </span>
+                      </div>
+                    </button>
+                  `;
+                }).join('')}
+              </div>
+
+              ${state.allUsers.length === 1 ? `
+                <div class="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <p class="text-sm text-yellow-800">
+                    Henüz başka koleksiyoncu yok. İlk koleksiyoncu sensin! 🎉
+                  </p>
+                </div>
+              ` : ''}
+            </aside>
+          </div>
+
+          <footer class="bg-gray-800 text-white py-6">
+            <div class="max-w-7xl mx-auto px-4 text-center">
+              <p>&copy; 2024 Keroi's Collection - Powered by Firebase</p>
+            </div>
+          </footer>
+        </div>
+      `;
+    }
+
+    function renderMainContent(stats) {
+      if (state.currentPage === 'home') {
+        return `
+          <div class="text-center py-12 px-4">
+            <div class="mb-8">
+              <i data-lucide="car" class="w-24 h-24 mx-auto mb-4 text-red-600"></i>
+              <h2 class="text-4xl font-bold mb-4 text-gray-800">
+                ${state.viewingUser ? state.viewingUser.username + "'in Koleksiyonu" : 'Koleksiyonuma Hoş Geldin!'}
+              </h2>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 max-w-4xl mx-auto mb-12">
+              <div class="bg-white p-6 rounded-lg shadow-md">
+                <i data-lucide="car" class="w-8 h-8 mx-auto mb-2 text-blue-600"></i>
+                <p class="text-3xl font-bold text-gray-800">${stats.totalCars}</p>
+                <p class="text-gray-600">Toplam Araç</p>
+              </div>
+              <div class="bg-white p-6 rounded-lg shadow-md">
+                <i data-lucide="dollar-sign" class="w-8 h-8 mx-auto mb-2 text-green-600"></i>
+                <p class="text-3xl font-bold text-gray-800">$${stats.totalValue.toFixed(2)}</p>
+                <p class="text-gray-600">Toplam Değer</p>
+              </div>
+              <div class="bg-white p-6 rounded-lg shadow-md">
+                <i data-lucide="package" class="w-8 h-8 mx-auto mb-2 text-purple-600"></i>
+                <p class="text-3xl font-bold text-gray-800">5</p>
+                <p class="text-gray-600">Marka</p>
+              </div>
+              <div class="bg-white p-6 rounded-lg shadow-md">
+                <i data-lucide="tag" class="w-8 h-8 mx-auto mb-2 text-orange-600"></i>
+                <p class="text-3xl font-bold text-gray-800">0</p>
+                <p class="text-gray-600">Etiket</p>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 max-w-6xl mx-auto">
+              ${Object.keys(brandInfo).map(brand => `
+                <button onclick="state.selectedBrand='${brand}'; state.currentPage='brand'; render();" 
+                  class="bg-white p-6 rounded-xl shadow-lg hover:shadow-2xl transform hover:scale-105 transition-all">
+                  <div class="h-24 flex items-center justify-center mb-3">
+                    <img src="${getBrandLogo(brand)}" alt="${brandInfo[brand].name}" class="w-full h-full object-contain">
+                  </div>
+                  <h3 class="text-lg font-bold text-gray-800">${brandInfo[brand].name}</h3>
+                  <p class="text-sm text-gray-600">${stats.brandStats[brand] || 0} araç</p>
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      }
+
+      if (state.currentPage === 'brand') {
+        return `
+          <div class="py-12 px-4 max-w-6xl mx-auto">
+            <button onclick="state.currentPage='home'; render();" 
+              class="mb-6 text-blue-600 hover:text-blue-800 flex items-center gap-2">
+              ← Ana Sayfaya Dön
+            </button>
+            
+            <h2 class="text-3xl font-bold mb-8">${brandInfo[state.selectedBrand].name} Kategorileri</h2>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              ${brandCategories[state.selectedBrand].map(category => {
+                const count = state.collections[state.selectedBrand]?.[category]?.length || 0;
+                return `
+                  <button onclick="state.selectedCategory='${category}'; state.currentPage='category'; render();" 
+                    class="bg-gradient-to-br ${brandInfo[state.selectedBrand].color} text-white p-6 rounded-lg shadow-md hover:shadow-xl">
+                    <h3 class="text-lg font-bold mb-2">${category}</h3>
+                    <p class="text-sm opacity-90">${count} araç</p>
+                  </button>
+                `;
+              }).join('')}
+            </div>
+          </div>
+        `;
+      }
+
+      if (state.currentPage === 'category') {
+        const items = state.collections[state.selectedBrand]?.[state.selectedCategory] || [];
+        return `
+          <div class="py-12 px-4 max-w-6xl mx-auto">
+            <button onclick="state.currentPage='brand'; render();" 
+              class="mb-6 text-blue-600 hover:text-blue-800 flex items-center gap-2">
+              ← Kategorilere Dön
+            </button>
+            
+            <div class="flex justify-between items-center mb-6">
+              <h2 class="text-3xl font-bold">${brandInfo[state.selectedBrand].name} - ${state.selectedCategory}</h2>
+              ${!state.viewingUser ? `
+                <button onclick="state.showAddModal=true; render();" 
+                  class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 font-bold flex items-center gap-2">
+                  <i data-lucide="plus" class="w-5 h-5"></i>
+                  Yeni Ekle
+                </button>
+              ` : ''}
+            </div>
+
+            ${items.length === 0 ? `
+              <div class="bg-white rounded-lg shadow-md p-12 text-center">
+                <i data-lucide="car" class="w-16 h-16 mx-auto mb-4 text-gray-400"></i>
+                <p class="text-gray-500 text-lg">Bu kategoride henüz araç yok.</p>
+              </div>
+            ` : `
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                ${items.map(item => `
+                  <div class="bg-white rounded-lg shadow-md overflow-hidden hover:shadow-xl transition-shadow group">
+                    <div class="w-full h-48 bg-gray-200 relative">
+                      <img src="${item.image}" alt="${item.name}" class="w-full h-full object-cover group-hover:scale-110 transition-transform">
+                      ${!state.viewingUser ? `
+                        <button onclick="handleDeleteCar('${item.id}')" 
+                          class="absolute top-2 right-2 bg-red-600 text-white p-2 rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-700">
+                          <i data-lucide="x" class="w-4 h-4"></i>
+                        </button>
+                      ` : ''}
+                      ${item.price ? `
+                        <div class="absolute bottom-2 left-2 bg-green-600 text-white px-3 py-1 rounded-full text-sm font-bold">
+                          ${item.price}
+                        </div>
+                      ` : ''}
+                    </div>
+                    <div class="p-6">
+                      <h3 class="font-bold text-lg mb-2">${item.name}</h3>
+                      ${item.year ? `<p class="text-gray-600 text-sm">Yıl: ${item.year}</p>` : ''}
+                      ${item.series ? `<p class="text-gray-600 text-sm">Seri: ${item.series}</p>` : ''}
+                      ${item.tags && item.tags.length > 0 ? `
+                        <div class="flex flex-wrap gap-1 mt-2">
+                          ${item.tags.map(tag => `<span class="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs">${tag}</span>`).join('')}
+                        </div>
+                      ` : ''}
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            `}
+
+            ${state.showAddModal ? `
+              <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                <div class="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                  <div class="p-6 border-b flex justify-between items-center sticky top-0 bg-white z-10">
+                    <h3 class="text-2xl font-bold">Yeni Araç Ekle</h3>
+                    <button onclick="state.showAddModal=false; render();" class="text-gray-500 hover:text-gray-700">
+                      <i data-lucide="x" class="w-6 h-6"></i>
+                    </button>
+                  </div>
+                  <div class="p-6 space-y-4">
+                    <input type="text" id="carName" placeholder="Araç adı *" 
+                      class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                    
+                    <div class="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
+                      <p class="text-gray-600 mb-2">Resim Yükle</p>
+                      <input type="file" id="carImage" accept="image/*" 
+                        class="w-full px-4 py-2 border rounded-lg">
+                      <p class="text-xs text-gray-500 mt-2">veya Ctrl+V ile yapıştırın</p>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4">
+                      <input type="text" id="carYear" placeholder="Yıl" 
+                        class="px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                      <input type="text" id="carSeries" placeholder="Seri" 
+                        class="px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                    </div>
+
+                    <input type="number" step="0.01" id="carPrice" placeholder="Fiyat ($)" 
+                      class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+
+                    <input type="date" id="carDate" 
+                      class="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+
+                    <div>
+                      <label class="block text-sm font-medium text-gray-700 mb-2">Etiketler</label>
+                      <div class="flex gap-2">
+                        <input type="text" id="carTag" placeholder="Etiket ekle" 
+                          class="flex-1 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+                        <button onclick="addTag()" 
+                          class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">
+                          <i data-lucide="plus" class="w-5 h-5"></i>
+                        </button>
+                      </div>
+                      <div id="tagList" class="flex flex-wrap gap-2 mt-2"></div>
+                    </div>
+
+                    <button onclick="submitAddCar()" 
+                      class="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700">
+                      Ekle
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }
+
+      return '';
+    }
+
+    function getBrandLogo(brand) {
+      const logos = {
+        hotwheels: 'https://cdn.freebiesupply.com/logos/large/2x/hot-wheels-1-logo-png-transparent.png',
+        miniGt: 'https://seeklogo.com/images/M/mini-gt-logo-8B0D0C5F5F-seeklogo.com.png',
+        matchbox: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 150'%3E%3Crect x='20' y='30' width='360' height='90' rx='45' fill='%23E63946'/%3E%3Crect x='30' y='40' width='340' height='70' rx='35' fill='%23FFD60A'/%3E%3Crect x='40' y='50' width='320' height='50' rx='25' fill='white'/%3E%3Ctext x='200' y='92' font-family='Arial Black' font-size='50' font-weight='900' fill='%23000' text-anchor='middle' font-style='italic'%3Ematchbox%3C/text%3E%3C/svg%3E",
+        majorette: 'https://upload.wikimedia.org/wikipedia/commons/thumb/e/e7/Majorette_logo.svg/2560px-Majorette_logo.svg.png',
+        lego: 'https://upload.wikimedia.org/wikipedia/commons/2/24/LEGO_logo.svg'
+      };
+      return logos[brand];
+    }
+
+    function setupEventListeners() {
+      if (state.showAddModal) {
+        const imageInput = document.getElementById('carImage');
+        if (imageInput) {
+          imageInput.onchange = async (e) => {
+            const file = e.target.files[0];
+            if (file) {
+              try {
+                state.formData.image = await processImageFile(file);
+              } catch (error) {
+                alert(error);
+              }
+            }
+          };
+        }
+
+        // Paste event
+        document.addEventListener('paste', async (e) => {
+          if (state.showAddModal) {
+            const items = e.clipboardData.items;
+            for (let i = 0; i < items.length; i++) {
+              if (items[i].type.indexOf('image') !== -1) {
+                const file = items[i].getAsFile();
+                try {
+                  state.formData.image = await processImageFile(file);
+                  alert('Resim yapıştırıldı!');
+                } catch (error) {
+                  alert(error);
+                }
+                break;
+              }
+            }
+          }
+        });
+
+        const tagInput = document.getElementById('carTag');
+        if (tagInput) {
+          tagInput.onkeypress = (e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              addTag();
+            }
+          };
+        }
+      }
+    }
+
+    function addTag() {
+      const tagInput = document.getElementById('carTag');
+      if (tagInput && tagInput.value.trim()) {
+        state.formData.tags.push(tagInput.value.trim());
+        tagInput.value = '';
+        updateTagList();
+      }
+    }
+
+    function removeTag(index) {
+      state.formData.tags.splice(index, 1);
+      updateTagList();
+    }
+
+    function updateTagList() {
+      const tagList = document.getElementById('tagList');
+      if (tagList) {
+        tagList.innerHTML = state.formData.tags.map((tag, idx) => `
+          <span class="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm flex items-center gap-1">
+            ${tag}
+            <button onclick="removeTag(${idx})" class="hover:text-blue-600">
+              <i data-lucide="x" class="w-3 h-3"></i>
+            </button>
+          </span>
+        `).join('');
+        lucide.createIcons();
+      }
+    }
+
+    async function submitAddCar() {
+      const name = document.getElementById('carName')?.value;
+      const year = document.getElementById('carYear')?.value;
+      const series = document.getElementById('carSeries')?.value;
+      const price = document.getElementById('carPrice')?.value;
+      const date = document.getElementById('carDate')?.value;
+
+      state.formData.name = name;
+      state.formData.year = year;
+      state.formData.series = series;
+      state.formData.price = price;
+      state.formData.purchaseDate = date;
+
+      await handleAddCar();
+    }
+
+    // Initialize app
+    window.addEventListener('DOMContentLoaded', () => {
+      render();
+    });
+  </script>
+</body>
+</html>
